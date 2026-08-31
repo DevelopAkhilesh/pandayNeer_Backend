@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  CUSTOMER
+  DELIVERY_BOY
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  ASSIGNED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// ─────────────────────────────────────────────
+// Core identity
+// ─────────────────────────────────────────────
+
+model User {
+  id        String        @id @default(uuid())
+  phone     String        @unique
+  name      String?
+  role      Role          @default(CUSTOMER)
+  status    AccountStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  customerProfile    CustomerProfile?
+  deliveryBoyProfile DeliveryBoyProfile?
+
+  ordersAsCustomer    Order[] @relation("CustomerOrders")
+  ordersAsDeliveryBoy Order[] @relation("DeliveryBoyOrders")
+
+  @@index([role])
+}
+
+model OtpRequest {
+  id        String   @id @default(uuid())
+  phone     String
+  otpHash   String
+  attempts  Int      @default(0)
+  verified  Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+}
+
+// ─────────────────────────────────────────────
+// Role-specific profiles
+// ─────────────────────────────────────────────
+
+model CustomerProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  email     String?
+  createdAt DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  addresses Address[]
+}
+
+model DeliveryBoyProfile {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  vehicleNumber         String?
+  isAvailable           Boolean  @default(true)
+  assignedServiceAreaId String?
+  createdAt             DateTime @default(now())
+
+  user                User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedServiceArea ServiceArea? @relation(fields: [assignedServiceAreaId], references: [id], onDelete: SetNull)
+
+  @@index([assignedServiceAreaId])
+}
+
+// ─────────────────────────────────────────────
+// Customer addresses
+// ─────────────────────────────────────────────
+
+model Address {
+  id                String   @id @default(uuid())
+  customerProfileId String
+  line1             String
+  line2             String?
+  city              String
+  pincode           String
+  isDefault         Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  customerProfile CustomerProfile @relation(fields: [customerProfileId], references: [id], onDelete: Cascade)
+  orders          Order[]
+
+  @@index([customerProfileId])
+  @@index([pincode])
+}
+
+// ─────────────────────────────────────────────
+// Serviceability
+// ─────────────────────────────────────────────
+
+model ServiceArea {
+  id        String   @id @default(uuid())
+  pincode   String   @unique
+  areaName  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  deliveryBoys DeliveryBoyProfile[]
+}
+
+// ─────────────────────────────────────────────
+// Catalog
+// ─────────────────────────────────────────────
+
+model Product {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  capacityMl  Int
+  price       Decimal  @db.Decimal(10, 2)
+  isDeposit   Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orderItems OrderItem[]
+}
+
+// ─────────────────────────────────────────────
+// Orders
+// ─────────────────────────────────────────────
+
+model Order {
+  id            String      @id @default(uuid())
+  customerId    String
+  deliveryBoyId String?
+  addressId     String
+  status        OrderStatus @default(PENDING)
+  totalAmount   Decimal     @db.Decimal(10, 2)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  deliveredAt   DateTime?
+
+  customer    User    @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Restrict)
+  deliveryBoy User?   @relation("DeliveryBoyOrders", fields: [deliveryBoyId], references: [id], onDelete: Restrict)
+  address     Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
+
+  items   OrderItem[]
+  payment Payment?
+
+  @@index([customerId])
+  @@index([deliveryBoyId])
+  @@index([status])
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  productId String
+  quantity  Int
+  unitPrice Decimal @db.Decimal(10, 2)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+// ─────────────────────────────────────────────
+// Payments
+// ─────────────────────────────────────────────
+
+model Payment {
+  id                String        @id @default(uuid())
+  orderId           String        @unique
+  amount            Decimal       @db.Decimal(10, 2)
+  status            PaymentStatus @default(PENDING)
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  razorpaySignature String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
