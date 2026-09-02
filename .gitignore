@@ -44,3 +44,4 @@ tmp/
 # Docker
 docker-compose.override.yml
 .neon
+.env.test

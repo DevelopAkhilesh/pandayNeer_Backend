@@ -50,6 +50,7 @@ model User {
   status    AccountStatus @default(ACTIVE)
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
+  tokenVersion Int @default(0)
 
   customerProfile    CustomerProfile?
   deliveryBoyProfile DeliveryBoyProfile?
@@ -64,12 +65,15 @@ model OtpRequest {
   id        String   @id @default(uuid())
   phone     String
   otpHash   String
+  ip        String?
   attempts  Int      @default(0)
   verified  Boolean  @default(false)
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([phone])
+  @@index([phone, createdAt])
+  @@index([phone, verified, expiresAt])
+  @@index([ip, createdAt]) 
 }
 
 // ─────────────────────────────────────────────

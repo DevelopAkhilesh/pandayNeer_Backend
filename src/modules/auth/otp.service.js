@@ -2,128 +2,273 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../../config/db.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import { sendOtpSms } from '../../services/sms/sms.provider.js';
 
 const OTP_EXPIRY_MINUTES = 5;
 const MAX_VERIFY_ATTEMPTS = 5;
 const SALT_ROUNDS = 10;
-const MIN_SECONDS_BETWEEN_REQUESTS = 60; // per-phone cooldown
 
-function generateOtp() {
-  return crypto.randomInt(100000, 999999).toString();
+// Cooldown is a UX guard (stops double-taps). The hourly/daily caps are the
+// actual security control: without them an attacker can farm 5 fresh guesses
+// per minute forever by simply re-requesting.
+const MIN_SECONDS_BETWEEN_REQUESTS = 60;
+const MAX_REQUESTS_PER_HOUR = 5;
+const MAX_REQUESTS_PER_DAY = 15;
+
+// Per-phone caps cannot stop an attacker who rotates numbers: each number
+// stays under its own limit while the SMS bill climbs. This is the actual
+// SMS-pumping control.
+const MAX_DISTINCT_PHONES_PER_IP_HOUR = 10;
+
+const INDIAN_MOBILE = /^[6-9]\d{9}$/;
+
+// One message for every verify failure — wrong code, expired, consumed,
+// attempts exhausted, never existed. Distinct messages would tell an attacker
+// whether a pending OTP exists for a given number.
+const GENERIC_VERIFY_ERROR = 'Invalid or expired OTP. Please request a new one';
+
+export function generateOtp() {
+  // Upper bound is EXCLUSIVE — 1000000, not 999999, or 999999 never occurs.
+  return crypto.randomInt(100000, 1000000).toString();
 }
 
 /**
- * Normalizes phone input to a consistent 10-digit Indian mobile format,
- * regardless of how the client sends it (+91, 91 prefix, spaces, dashes).
+ * Normalizes phone input to a 10-digit Indian mobile number.
+ *
+ * This is also the implicit country allowlist that protects against SMS
+ * pumping fraud (attackers driving traffic to premium international routes).
+ * Do not loosen it to accept arbitrary international numbers without adding
+ * a separate per-country policy first.
+ *
+ * Accepts: 9876543210, +91 98765 43210, 91-9876543210, 09876543210,
+ *          00919876543210
+ * Rejects: anything not starting 6-9, wrong length, non-strings, null.
  */
 export function normalizePhone(rawPhone) {
-  if (!rawPhone || typeof rawPhone !== 'string') return null;
+  if (typeof rawPhone !== 'string') return null;
 
   const digitsOnly = rawPhone.replace(/\D/g, '');
+  if (!digitsOnly) return null;
 
-  // Strip a leading country code (91) if present, leaving the 10-digit number
-  const normalized =
-    digitsOnly.length === 12 && digitsOnly.startsWith('91')
-      ? digitsOnly.slice(2)
-      : digitsOnly;
-
-  return normalized.length === 10 ? normalized : null;
-}
-
-/**
- * Sends the OTP to the given phone number.
- * NOTE: SMS provider (MSG91) is not wired up yet — this currently
- * only logs the OTP to the console for local development/testing.
- * Replace the console.log below with a real MSG91 API call later.
- */
-async function sendOtpSms(phone, otp) {
-  console.log(`📱 [DEV ONLY] OTP for ${phone}: ${otp}`);
-  // TODO: integrate MSG91 here, e.g.:
-  // await axios.post('https://control.msg91.com/api/v5/otp', { ... })
-}
-// request otp function 
-export async function requestOtp(rawPhone) {
-  const phone = normalizePhone(rawPhone);
-  if (!phone) {
-    throw new AppError('A valid 10-digit phone number is required', 400);
+  // Strip leading zeros (trunk prefix / 00 international prefix), then the
+  // 91 country code if what remains is 12 digits.
+  let normalized = digitsOnly.replace(/^0+/, '');
+  if (normalized.length === 12 && normalized.startsWith('91')) {
+    normalized = normalized.slice(2);
   }
 
-  const now = new Date();
+  return INDIAN_MOBILE.test(normalized) ? normalized : null;
+}
 
-  // Per-phone cooldown: block rapid-fire repeat requests regardless of IP.
-  const recentRequest = await prisma.otpRequest.findFirst({
+export async function requestOtp(rawPhone, { ip = null } = {}) {
+  const phone = normalizePhone(rawPhone);
+  if (!phone) {
+    throw new AppError(
+      'A valid 10-digit Indian mobile number is required',
+      400
+    );
+  }
+
+  // Hash outside the transaction — bcrypt at 10 rounds takes ~100ms and we do
+  // not want to hold a Serializable transaction open for that long.
+  const otp = generateOtp();
+  const otpHash = await bcrypt.hash(otp, SALT_ROUNDS);
+
+  let created;
+  try {
+    created = await prisma.$transaction(
+      async (tx) => {
+        const now = new Date();
+        const cooldownSince = new Date(
+          now.getTime() - MIN_SECONDS_BETWEEN_REQUESTS * 1000
+        );
+        const hourSince = new Date(now.getTime() - 60 * 60 * 1000);
+        const daySince = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+        // All three windows in one round trip. As three separate count()
+        // calls this cost ~900ms each against a remote database — enough on
+        // its own to exceed the transaction timeout before reaching the
+        // create below. Conditional aggregates read the same index once.
+        // verified:false on the cooldown matters — a user who just logged in
+        // successfully and logs out should not be told "please wait".
+        const [counts] = await tx.$queryRaw`
+          SELECT
+            count(*) FILTER (
+              WHERE verified = false AND "createdAt" > ${cooldownSince}
+            ) AS "cooldown",
+            count(*) FILTER (WHERE "createdAt" > ${hourSince}) AS "hour_count",
+            count(*) FILTER (WHERE "createdAt" > ${daySince}) AS "day_count",
+            (
+              SELECT count(DISTINCT phone)
+              FROM "OtpRequest"
+              WHERE ip = ${ip}
+                AND "createdAt" > ${hourSince}
+                AND phone <> ${phone}
+            ) AS "other_phones_for_ip"
+          FROM "OtpRequest"
+          WHERE phone = ${phone}
+        `;
+
+        // count() returns bigint over the wire; compare as Number.
+        if (Number(counts.cooldown) > 0) {
+          throw new AppError('Please wait before requesting another OTP', 429);
+        }
+        if (Number(counts.hour_count) >= MAX_REQUESTS_PER_HOUR) {
+          throw new AppError(
+            'Too many OTP requests. Please try again later',
+            429
+          );
+        }
+        if (Number(counts.day_count) >= MAX_REQUESTS_PER_DAY) {
+          throw new AppError(
+            'Daily OTP limit reached. Please try again tomorrow',
+            429
+          );
+        }
+
+        // SMS-pumping control. Counting OTHER phones means a user
+        // re-requesting for their own number is never affected by it. `ip =
+        // NULL` matches nothing in SQL, so a missing IP simply skips the
+        // check rather than matching every row with a null ip.
+        if (
+          Number(counts.other_phones_for_ip) >= MAX_DISTINCT_PHONES_PER_IP_HOUR
+        ) {
+          throw new AppError(
+            'Too many OTP requests. Please try again later',
+            429
+          );
+        }
+
+        // Invalidate older unverified OTPs by expiring them, so exactly one
+        // active OTP exists per phone. Deliberately NOT setting verified=true —
+        // that would corrupt what "verified" means in analytics.
+        await tx.otpRequest.updateMany({
+          where: { phone, verified: false, expiresAt: { gt: now } },
+          data: { expiresAt: now },
+        });
+
+        return tx.otpRequest.create({
+          data: {
+            phone,
+            otpHash,
+            ip,
+            expiresAt: new Date(now.getTime() + OTP_EXPIRY_MINUTES * 60 * 1000),
+          },
+        });
+      },
+      {
+        isolationLevel: 'Serializable',
+        // Defaults are maxWait 2s / timeout 5s, both of which this database is
+        // too far away to meet: acquiring a connection alone measured 3-5s,
+        // and each round trip inside the body costs ~900ms.
+        maxWait: 15_000,
+        timeout: 15_000,
+      }
+    );
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    // P2034 = Prisma write conflict / deadlock. Under Serializable this is how
+    // two genuinely simultaneous requests for the same phone get resolved: one
+    // commits, the other aborts. Treat the loser as a cooldown hit.
+    if (err?.code === 'P2034') {
+      throw new AppError('Please wait before requesting another OTP', 429);
+    }
+    throw err;
+  }
+
+  // Send AFTER commit — never hold a transaction open across network I/O.
+  try {
+    await sendOtpSms(phone, otp);
+  } catch (err) {
+    // The caller gets a generic 502, so this log is the only record of why the
+    // send actually failed. Phone number only — never the code.
+    console.error(`OTP send failed for ${phone}: ${err.message}`);
+
+    // A send failure must NOT return "OTP sent successfully". Expire the row so
+    // the user is not stuck in cooldown waiting for a code that never left.
+    await prisma.otpRequest.updateMany({
+      where: { id: created.id },
+      data: { expiresAt: new Date() },
+    });
+    throw new AppError('Could not send OTP right now. Please try again', 502);
+  }
+
+  return { expiresAt: created.expiresAt };
+}
+
+export async function verifyOtp(rawPhone, otp) {
+  const phone = normalizePhone(rawPhone);
+  if (!phone) {
+    throw new AppError(
+      'A valid 10-digit Indian mobile number is required',
+      400
+    );
+  }
+
+  const code = typeof otp === 'string' ? otp.trim() : '';
+  if (!/^\d{6}$/.test(code)) {
+    // Cheap reject before touching bcrypt — also stops bcrypt DoS via huge input.
+    throw new AppError(GENERIC_VERIFY_ERROR, 400);
+  }
+
+  const record = await prisma.otpRequest.findFirst({
     where: {
       phone,
-      createdAt: { gt: new Date(now.getTime() - MIN_SECONDS_BETWEEN_REQUESTS * 1000) },
+      verified: false,
+      expiresAt: { gt: new Date() },
+      attempts: { lt: MAX_VERIFY_ATTEMPTS },
     },
     orderBy: { createdAt: 'desc' },
   });
 
-  if (recentRequest) {
-    throw new AppError(
-      `Please wait before requesting another OTP`,
-      429
-    );
-  }
-
-  // Invalidate any older unverified OTPs for this phone by expiring them
-  // immediately, so exactly one active OTP chain exists at a time.
-  // (Deliberately NOT setting verified=true here — that would falsely
-  // claim the user completed verification, corrupting analytics on what
-  // "verified" actually means.)
-  await prisma.otpRequest.updateMany({
-    where: { phone, verified: false, expiresAt: { gt: now } },
-    data: { expiresAt: now },
-  });
-
-  const otp = generateOtp();
-  const otpHash = await bcrypt.hash(otp, SALT_ROUNDS);
-  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-
-  await prisma.otpRequest.create({
-    data: { phone, otpHash, expiresAt },
-  });
-
-  await sendOtpSms(phone, otp);
-}
-// verufy otp function for verification
-export async function verifyOtp(rawPhone, otp) {
-  const phone = normalizePhone(rawPhone);
-  if (!phone) {
-    throw new AppError('A valid 10-digit phone number is required', 400);
-  }
-
-  const now = new Date();
-
-  const record = await prisma.otpRequest.findFirst({
-    where: { phone, verified: false, expiresAt: { gt: now } },
-    orderBy: { createdAt: 'desc' },
-  });
-
   if (!record) {
-    throw new AppError('No valid OTP request found. Please request a new one', 400);
+    throw new AppError(GENERIC_VERIFY_ERROR, 400);
   }
 
-  if (record.attempts >= MAX_VERIFY_ATTEMPTS) {
-    throw new AppError('Too many incorrect attempts. Please request a new OTP', 429);
-  }
-
-  const isMatch = await bcrypt.compare(otp, record.otpHash);
+  const isMatch = await bcrypt.compare(code, record.otpHash);
 
   if (!isMatch) {
-    // Atomic, guarded increment — avoids the read-then-write race entirely.
-    // If two requests race here, both WHERE clauses still evaluate against
-    // the DB's current row state at the moment each UPDATE executes,
-    // so attempts can never under-count under concurrent wrong guesses.
+    // Atomic guarded increment — cannot under-count under concurrent guesses.
     await prisma.otpRequest.updateMany({
       where: { id: record.id, attempts: { lt: MAX_VERIFY_ATTEMPTS } },
       data: { attempts: { increment: 1 } },
     });
-    throw new AppError('Invalid OTP', 400);
+    throw new AppError(GENERIC_VERIFY_ERROR, 400);
   }
 
-  await prisma.otpRequest.update({
-    where: { id: record.id },
+  // Guarded consume. bcrypt.compare takes ~100ms, which is a wide window for
+  // two concurrent correct requests to both pass. Only one can flip the row,
+  // so only one gets a session token.
+  const consumed = await prisma.otpRequest.updateMany({
+    where: { id: record.id, verified: false, expiresAt: { gt: new Date() } },
     data: { verified: true },
   });
+
+  if (consumed.count === 0) {
+    throw new AppError(GENERIC_VERIFY_ERROR, 400);
+  }
+
+  return { phone };
 }
+
+/**
+ * Housekeeping. Call from a cron (daily is fine) — the table otherwise grows
+ * forever and every findFirst/count above scans more rows.
+ */
+export async function purgeOldOtpRequests(olderThanHours = 24) {
+  const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
+  const { count } = await prisma.otpRequest.deleteMany({
+    where: { createdAt: { lt: cutoff } },
+  });
+  return count;
+}
+
+export const __testConfig = {
+  OTP_EXPIRY_MINUTES,
+  MAX_VERIFY_ATTEMPTS,
+  MIN_SECONDS_BETWEEN_REQUESTS,
+  MAX_REQUESTS_PER_HOUR,
+  MAX_REQUESTS_PER_DAY,
+  MAX_DISTINCT_PHONES_PER_IP_HOUR,
+  GENERIC_VERIFY_ERROR,
+};

@@ -16,7 +16,11 @@ async function verifyOnce(label) {
   const res = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phone: TEST_PHONE, otp: TEST_OTP, name: 'Race Test' }),
+    body: JSON.stringify({
+      phone: TEST_PHONE,
+      otp: TEST_OTP,
+      name: 'Race Test',
+    }),
   });
   const body = await res.json();
   console.log(`[${label}] status=${res.status}`, body);
