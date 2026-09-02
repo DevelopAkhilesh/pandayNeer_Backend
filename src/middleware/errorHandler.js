@@ -32,7 +32,9 @@ export function notFoundHandler(req, res, next) {
   next(new AppError(`Route not found: ${req.method} ${req.originalUrl}`, 404));
 }
 
-export function errorHandler(err, req, res, next) {
+// Four parameters are required: Express uses arity to tell error middleware
+// from ordinary middleware. Dropping `_next` silently stops this running.
+export function errorHandler(err, req, res, _next) {
   let error = err;
 
   const prismaError = err.code ? handlePrismaError(err) : null;
