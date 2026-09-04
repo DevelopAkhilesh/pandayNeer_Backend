@@ -8,6 +8,25 @@ const OTP_EXPIRY_MINUTES = 5;
 const MAX_VERIFY_ATTEMPTS = 5;
 const SALT_ROUNDS = 10;
 
+/**
+ * A real bcrypt hash of a string no OTP can ever equal (OTPs are 6 digits).
+ *
+ * Purpose is timing, not secrecy. Without it, verifyOtp returns instantly when
+ * no pending OTP exists and takes ~100ms when one does — so an attacker who
+ * submits a junk code and watches the clock learns whether a given phone
+ * number has a live OTP. That is exactly the fact GENERIC_VERIFY_ERROR was
+ * written to hide.
+ *
+ * Generated at boot rather than hardcoded for two reasons: a hardcoded string
+ * can be malformed, and bcrypt.compare rejects a malformed hash immediately —
+ * which reintroduces the fast path this exists to remove. Deriving it from
+ * SALT_ROUNDS also keeps the dummy comparison exactly as expensive as a real
+ * one if that constant ever changes.
+ *
+ * Costs one bcrypt round (~100ms) at startup, once.
+ */
+const DUMMY_HASH = bcrypt.hashSync('no-otp-matches-this', SALT_ROUNDS);
+
 // Cooldown is a UX guard (stops double-taps). The hourly/daily caps are the
 // actual security control: without them an attacker can farm 5 fresh guesses
 // per minute forever by simply re-requesting.
@@ -94,10 +113,10 @@ export async function requestOtp(rawPhone, { ip = null } = {}) {
         const [counts] = await tx.$queryRaw`
           SELECT
             count(*) FILTER (
-              WHERE verified = false AND "createdAt" > ${cooldownSince}
+              WHERE verified = false AND "sendFailed" = false AND "createdAt" > ${cooldownSince}
             ) AS "cooldown",
-            count(*) FILTER (WHERE "createdAt" > ${hourSince}) AS "hour_count",
-            count(*) FILTER (WHERE "createdAt" > ${daySince}) AS "day_count",
+            count(*) FILTER (WHERE "sendFailed" = false AND "createdAt" > ${hourSince}) AS "hour_count",
+            count(*) FILTER (WHERE "sendFailed" = false AND "createdAt" > ${daySince}) AS "day_count",
             (
               SELECT count(DISTINCT phone)
               FROM "OtpRequest"
@@ -158,11 +177,20 @@ export async function requestOtp(rawPhone, { ip = null } = {}) {
       },
       {
         isolationLevel: 'Serializable',
-        // Defaults are maxWait 2s / timeout 5s, both of which this database is
-        // too far away to meet: acquiring a connection alone measured 3-5s,
-        // and each round trip inside the body costs ~900ms.
-        maxWait: 15_000,
-        timeout: 15_000,
+        // These are Prisma's defaults. Stated explicitly because they were
+        // 15s for most of this file's history, and why they no longer need
+        // to be is worth keeping.
+        //
+        // The body is five round trips — BEGIN, the aggregate, the updateMany,
+        // the create, COMMIT. Against Supabase ap-south-1 that is ~330ms from
+        // a dev laptop (~66ms each) and ~10ms from an API in the same region.
+        // Acquisition is no longer a problem either: db.js keeps the pool warm,
+        // so the ~490ms cold handshake never lands inside a request.
+        //
+        // If these ever need raising again the cause is distance or a cold
+        // pool, not this transaction. Measure both before changing them.
+        maxWait: 2_000,
+        timeout: 5_000,
       }
     );
   } catch (err) {
@@ -188,14 +216,14 @@ export async function requestOtp(rawPhone, { ip = null } = {}) {
     // the user is not stuck in cooldown waiting for a code that never left.
     await prisma.otpRequest.updateMany({
       where: { id: created.id },
-      data: { expiresAt: new Date() },
+      data: { expiresAt: new Date(), sendFailed: true },
     });
     throw new AppError('Could not send OTP right now. Please try again', 502);
   }
 
   return { expiresAt: created.expiresAt };
 }
-
+// verify otp function
 export async function verifyOtp(rawPhone, otp) {
   const phone = normalizePhone(rawPhone);
   if (!phone) {
@@ -222,6 +250,14 @@ export async function verifyOtp(rawPhone, otp) {
   });
 
   if (!record) {
+    // Burn the same ~100ms a real comparison would, so "no pending OTP for
+    // this number" and "wrong code for this number" are indistinguishable
+    // from outside. The result is discarded — it can never be true.
+    //
+    // Note this covers four states at once: no OTP was ever requested, it
+    // expired, it was already consumed, or its attempts are exhausted. All
+    // four must look identical, and now all four also *take* the same time.
+    await bcrypt.compare(code, DUMMY_HASH);
     throw new AppError(GENERIC_VERIFY_ERROR, 400);
   }
 

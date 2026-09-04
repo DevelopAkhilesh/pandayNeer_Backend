@@ -70,10 +70,11 @@ model OtpRequest {
   verified  Boolean  @default(false)
   expiresAt DateTime
   createdAt DateTime @default(now())
+  sendFailed Boolean @default(false)
 
   @@index([phone, createdAt])
   @@index([phone, verified, expiresAt])
-  @@index([ip, createdAt]) 
+  @@index([ip, createdAt])
 }
 
 // ─────────────────────────────────────────────
