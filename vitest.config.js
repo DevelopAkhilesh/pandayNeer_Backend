@@ -5,11 +5,14 @@ dotenv.config({ path: '.env.test' });
 
 export default defineConfig({
   test: {
-    // The test database is a remote Neon branch: a single round trip costs
-    // ~900ms, so one requestOtp is ~3-4s and the multi-request rate-limit
-    // tests need well past the 30s these used to allow.
-    testTimeout: 90_000,
-    hookTimeout: 60_000,
+    // The test database is local Postgres in Docker (see .env.test), so a round
+    // trip is sub-millisecond and every test is bounded by bcrypt at 10 rounds
+    // (~100ms per hash), not by the network. The slowest tests are the ones
+    // that loop over the hourly cap — a handful of hashes, well under a second.
+    // 10s is headroom for a cold container, not a latency allowance: if a test
+    // approaches it, something is wrong rather than slow.
+    testTimeout: 10_000,
+    hookTimeout: 10_000,
     fileParallelism: false,
   },
 });
