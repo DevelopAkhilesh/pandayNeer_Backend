@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 import crypto from 'crypto';
 import { normalizePhone, generateOtp } from './otp.service.js';
 
-
 // ---------------------------------------------------------------------------
 // 1. normalizePhone — pure, no DB
 // ---------------------------------------------------------------------------

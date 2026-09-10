@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import { env } from './config/env.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './modules/auth/auth.routes.js';
+import serviceAreaRoutes from './modules/service-areas/service-areas.routes.js';
 const app = express();
 
 // Comma-separated so staging/preview origins can be added without a code
@@ -20,7 +21,7 @@ app.use(helmet());
 app.use(cors({ origin: allowedOrigins }));
 app.use(morgan('dev'));
 app.use(express.json());
-app.set('trust proxy', 1)
+app.set('trust proxy', 1);
 
 app.get('/', (req, res) => {
   res.json({ message: 'pandeyNeer API is running' });
@@ -29,8 +30,10 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
-
+// auth route
 app.use('/api/auth', authRoutes);
+// picode route
+app.use('/api/service-areas', serviceAreaRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
