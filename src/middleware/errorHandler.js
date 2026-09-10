@@ -46,6 +46,21 @@ export function errorHandler(err, req, res, _next) {
     error = new AppError('Validation failed', 400, err.issues);
   }
 
+  // body-parser rejects a malformed or oversized body before any route runs.
+  // Those errors carry a 4xx statusCode and `expose: true` — http-errors' own
+  // signal that the message is safe to show the client — but not
+  // `isOperational`. Without this branch a client-side typo is answered with
+  // "Something went wrong" and logged as 🔥 Unexpected error with a stack
+  // trace, so real incidents drown in other people's bad JSON.
+  if (err.expose && err.statusCode >= 400 && err.statusCode < 500) {
+    error = new AppError(
+      err.type === 'entity.parse.failed'
+        ? 'Malformed JSON in request body'
+        : err.message,
+      err.statusCode
+    );
+  }
+
   const statusCode = error.statusCode ?? 500;
   const message = error.isOperational ? error.message : 'Something went wrong';
 
