@@ -2,6 +2,52 @@
 
 Why things are the way they are. Newest first.
 
+## 2026-09-09 — Serviceable pincodes are cached in process, not read per request
+
+**Problem.** `/service-areas/check` is the app's opening screen — the customer
+types a pincode before anything else happens. Every call was a Postgres round
+trip to re-read a table of a few dozen rows that changes maybe twice a month.
+That is ~66ms added to the first screen from a dev laptop, and one query per
+app open forever, to re-learn something that has not changed since last month.
+
+**Fix.** An in-process `Map` of active pincodes in `service-areas.cache.js`
+with a 60s TTL. `/check` reads it exclusively and does not touch Postgres.
+Primed at boot so the first customer of the day does not pay for the load, and
+non-fatal if that prime fails — the first request just loads it normally. All
+three admin write paths call `invalidateServiceAreaCache()`.
+
+**Why a Map and not Redis.** The whole set is a few dozen six-character strings,
+under a kilobyte. A hash lookup in this process beats a network round trip to a
+cache server, so Redis would be _slower_ here as well as being one more thing to
+run and pay for. It earns its place when the data outgrows memory or has to be
+shared — neither is true, and pretending otherwise now is cost without benefit.
+
+**The cost of that choice, stated plainly.** Each instance holds its own copy,
+so after an admin toggles an area the other instances stay wrong for up to 60
+seconds. That is survivable **only** because `/check` is not the last word:
+address creation and order placement re-check against the database directly. A
+stale cache can let someone past the first screen; it cannot let an order
+through for an area we do not cover. Do not read this cache at those later
+gates — doing so is what would turn a display nicety into a delivery promise we
+cannot keep.
+
+**Stampede guard.** A TTL lapse under load would otherwise fire one query per
+concurrent request rather than one query total. `refreshing ??= load()` makes
+the first caller run the query while everyone behind it awaits the same promise.
+
+**Stale-on-error.** If a refresh fails while an old copy is still held, the old
+copy is served rather than a 500. A pincode list sixty seconds out of date is a
+far better answer on the opening screen than an error, and the later gates catch
+anything it gets wrong. Only a cold cache with an unreachable database throws.
+
+**Not cached.** The admin listing reads the database directly — it needs
+inactive rows, and the cache deliberately never loads them, which is what makes
+`has()` the entire serviceability check.
+
+**Open.** `invalidateServiceAreaCache()` only fixes the instance that handled the
+write. Once this runs on more than one instance behind a load balancer, that
+function is where a Redis pub/sub broadcast hooks in; the callers do not change.
+
 ## 2026-09-04 — verifyOtp burns a dummy bcrypt hash when no OTP is pending
 
 **Problem.** `GENERIC_VERIFY_ERROR` returns one identical message for wrong,
@@ -22,7 +68,7 @@ still pass any test that only asserts the call rejects. Deriving it from
 `SALT_ROUNDS` also keeps the dummy comparison exactly as expensive as a real one
 if that constant is ever raised. Costs one hash (~100ms) at startup, once.
 
-**Note.** The test file's `$2a$10$placeholderplaceholder...` constant is *not*
+**Note.** The test file's `$2a$10$placeholderplaceholder...` constant is _not_
 valid bcrypt. It is fine as a column filler for seeded rows, but it would have
 been useless here for the reason above.
 
@@ -41,14 +87,13 @@ that round trip alone was ~60ms and the test would have been permanently flaky.
 network jitter — are not measurable or controllable here and are not the channel
 an attacker would use anyway.
 
-
 ## 2026-09-04 — Test database is local Postgres in Docker, not a cloud branch
 
 **Problem.** A test run failed with `err.statusCode === undefined` — no status
 at all, meaning something threw that was not an `AppError`. Two separate causes,
 both of which existed because the test database was a remote Neon branch:
 
-1. `add_send_failed` had been applied to the *production* branch and not to the
+1. `add_send_failed` had been applied to the _production_ branch and not to the
    test branch. `prisma.config.ts` does `import 'dotenv/config'`, which loads
    `.env` and nothing else, so `prisma migrate dev` silently targeted
    production. The test branch had no `sendFailed` column.
@@ -64,6 +109,7 @@ loaded by `vitest.config.js`. `dotenv-cli` added as a dev dependency so Prisma
 commands can be aimed at a specific env file.
 
 **Why local rather than a second cloud branch.**
+
 - The round trip is sub-millisecond, so the suite is bounded by bcrypt rather
   than the network. A full run was 95s against Neon.
 - `beforeEach` calls `deleteMany({})`. That is correct for a test database and
@@ -73,6 +119,7 @@ commands can be aimed at a specific env file.
 - Nobody can wipe a shared database by running `npm test`.
 
 **Changed as a result.**
+
 - `vitest.config.js` — `testTimeout` 90s → 10s, `hookTimeout` 60s → 10s
 
 **The trap that caused this, stated plainly.** `prisma.config.ts` loads `.env`
@@ -95,13 +142,12 @@ a test bug rather than a build step that was skipped.
 95s. The 5 failures seen beforehand were entirely artifacts of the old remote
 test branch (missing `sendFailed` column, plus the stale client). In particular
 `rate limits are per-phone, not global`, which was failing with a P2034 write
-conflict on a *sequential* call, has not reappeared: on a sub-millisecond
+conflict on a _sequential_ call, has not reappeared: on a sub-millisecond
 connection the Serializable transaction commits far too quickly to collide.
 There was no bug to find — the write conflicts were an artifact of holding the
 transaction open across ~60ms round trips.
 
 **Open.** No npm script wires `dotenv-cli` yet — the commands above are manual.
-
 
 ## 2026-09-04 — Moved Postgres from Neon (Singapore) to Supabase (Mumbai)
 
@@ -115,12 +161,12 @@ Supavisor session pooler at `aws-0-ap-south-1.pooler.supabase.com:5432`.
 
 **Measured** (from the dev laptop, 2026-09-04):
 
-| | Neon Singapore | Supabase Mumbai |
-|---|---|---|
-| Warm round trip | ~110ms | 66ms median (59–66) |
-| Cold connect | ~900ms | 492ms |
-| TCP handshake alone | — | 66–98ms |
-| DNS | — | 60ms |
+|                     | Neon Singapore | Supabase Mumbai     |
+| ------------------- | -------------- | ------------------- |
+| Warm round trip     | ~110ms         | 66ms median (59–66) |
+| Cold connect        | ~900ms         | 492ms               |
+| TCP handshake alone | —              | 66–98ms             |
+| DNS                 | —              | 60ms                |
 
 Region confirmed rather than assumed: A records `3.111.105.85` /
 `65.0.195.55` are AWS ap-south-1, and `inet_server_addr()` returns
@@ -138,6 +184,7 @@ connection to Postgres. This is why `min: 2` and `warmDbPool()` stay — they ar
 the reason the observed median is 66ms and not 500ms.
 
 **Changed as a result.**
+
 - `.env` — `DATABASE_URL` → Supabase pooler, with `?sslmode=require`
 - `.env.example` — same, with a note on why `sslmode` is not optional
 - `prisma.config.ts` — datasource back to `env('DATABASE_URL')`; Supabase
@@ -160,6 +207,7 @@ eavesdropping, not an active MITM. `verify-full` needs Supabase's CA cert
 referenced via `sslrootcert=`.
 
 **Deliberately kept.**
+
 - Session pooler on 5432 rather than transaction mode on 6543. Transaction mode
   addresses connection count, not latency, and would require `pgbouncer=true`
   and the loss of prepared statements.
@@ -173,7 +221,6 @@ cannot keep in sync: `@default(uuid())` is client-side, so the raw INSERT has to
 supply the id, and a future required column would fail at runtime rather than at
 build time. The latency win was quoted from the laptop; against the real number
 it does not justify losing schema safety.
-
 
 ## 2026-09-03 — Moved Postgres from us-east-2 to ap-southeast-1
 
@@ -192,21 +239,23 @@ too — colocation is the point, not the region name.
 
 **Measured.**
 
-| | Ohio | Singapore |
-|---|---|---|
-| Warm round trip (from dev) | ~900ms | ~110ms |
-| Cold connect | 3–5s | ~900ms |
-| `requestOtp` transaction | ~2.7s | ~330ms |
+|                            | Ohio   | Singapore |
+| -------------------------- | ------ | --------- |
+| Warm round trip (from dev) | ~900ms | ~110ms    |
+| Cold connect               | 3–5s   | ~900ms    |
+| `requestOtp` transaction   | ~2.7s  | ~330ms    |
 
 In production, with the API in the same region, the warm round trip should
 be 1–3ms rather than 110ms.
 
 **Changed as a result.**
+
 - `vitest.config.js` — `testTimeout` 90s → 20s (slowest test is 8.6s)
 - `config/db.js` — `connectionTimeoutMillis` 15s → 5s
 - `otp.service.js` — `maxWait` 15s → 5s, `timeout` 15s → 8s
 
 **Deliberately kept.**
+
 - The `count(*) FILTER` aggregate in `requestOtp`. One query instead of
   three is correct regardless of latency — this was never a latency
   workaround.
@@ -217,7 +266,6 @@ be 1–3ms rather than 110ms.
 **Open.** Consider moving rate-limit counters to Redis, which would remove
 the Serializable transaction from the login path entirely. Not urgent now
 that a round trip is milliseconds.
-
 
 ## 2026-09-03 — Failed SMS sends no longer count against per-phone limits
 
@@ -236,6 +284,7 @@ the catch block. Added `AND "sendFailed" = false` to the cooldown, hour, and day
 FILTER clauses.
 
 **Deliberately kept.**
+
 - `expiresAt: new Date()` stays. It kills the code; `sendFailed` clears the
   rate-limit footprint. Two different jobs — dropping either reintroduces half
   the bug.
@@ -264,13 +313,14 @@ nothing: one request per number keeps every number inside every limit.
 reasons. It breaks real users — Jio and Airtel put large numbers of subscribers
 behind CGNAT, so hundreds of unrelated customers share one public IP. And it
 measures the wrong thing: what separates an attacker from a customer is how many
-*different* numbers they touch, not how many requests they make.
+_different_ numbers they touch, not how many requests they make.
 
 **Fix.** `MAX_DISTINCT_PHONES_PER_IP_HOUR = 10`, enforced inside `requestOtp`'s
 transaction as a scalar subquery in the existing aggregate — no extra round trip.
 Coarse IP limiter raised to 30/15min as an outer net only.
 
 **Deliberately kept.**
+
 - The subquery excludes the requesting phone (`phone <> ${phone}`), so a user
   re-requesting their own code never consumes their own IP budget.
 - `ip = NULL` matches nothing in SQL, so a missing IP skips the check rather
