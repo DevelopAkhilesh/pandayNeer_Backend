@@ -2,8 +2,7 @@ import 'dotenv/config';
 import { z } from 'zod';
 // env schema fro checking the env variables are correct or not
 const envSchema = z.object({
-  NODE_ENV: z
-    .enum(['development', 'production', 'test']),
+  NODE_ENV: z.enum(['development', 'production', 'test']),
   PORT: z.coerce.number().default(5050),
 
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN is required'),

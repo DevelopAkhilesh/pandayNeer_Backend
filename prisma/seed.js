@@ -365,7 +365,11 @@ async function main() {
     { role: 'ADMIN', phone: PHONE.admin, note: 'admin routes' },
     { role: 'DELIVERY_BOY', phone: PHONE.deliveryBoy, note: 'Andheri West' },
     { role: 'CUSTOMER', phone: PHONE.customer, note: '2 addresses, 2 orders' },
-    { role: 'CUSTOMER', phone: PHONE.suspended, note: 'SUSPENDED — guard test' },
+    {
+      role: 'CUSTOMER',
+      phone: PHONE.suspended,
+      note: 'SUSPENDED — guard test',
+    },
   ]);
   console.log(
     `\nServiceable: ${andheriWest.pincode}, ${versova.pincode}` +

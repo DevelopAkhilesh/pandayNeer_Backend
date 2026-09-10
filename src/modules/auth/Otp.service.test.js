@@ -96,7 +96,6 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-
 // ---------------------------------------------------------------------------
 // 3. requestOtp — happy path
 // ---------------------------------------------------------------------------
@@ -343,32 +342,32 @@ describe('SMS delivery failure', () => {
   });
 
   it('does not strand the user in cooldown after a failed send', async () => {
-  sendOtpSms.mockRejectedValueOnce(new Error('MSG91 down'));
-  await expectAppError(requestOtp(PHONE), 502);
-  // No backdate. If the failed row still blocks, this throws 429.
-  await expect(requestOtp(PHONE)).resolves.toBeTruthy();
-});
-
-it('failed sends do not consume the hourly cap', async () => {
-  // Persistent, not Once: a one-shot queued per iteration is only consumed if
-  // that iteration actually reaches the send, so any early throw leaves the
-  // queue out of step with the loop.
-  sendOtpSms.mockRejectedValue(new Error('MSG91 down'));
-
-  for (let i = 0; i < CFG.MAX_REQUESTS_PER_HOUR + 2; i++) {
+    sendOtpSms.mockRejectedValueOnce(new Error('MSG91 down'));
     await expectAppError(requestOtp(PHONE), 502);
-  }
+    // No backdate. If the failed row still blocks, this throws 429.
+    await expect(requestOtp(PHONE)).resolves.toBeTruthy();
+  });
 
-  // Restore success so the final request can actually go through.
-  sendOtpSms.mockResolvedValue({ provider: 'mock', messageId: 'mock-1' });
-  await expect(requestOtp(PHONE)).resolves.toBeTruthy();
-});
+  it('failed sends do not consume the hourly cap', async () => {
+    // Persistent, not Once: a one-shot queued per iteration is only consumed if
+    // that iteration actually reaches the send, so any early throw leaves the
+    // queue out of step with the loop.
+    sendOtpSms.mockRejectedValue(new Error('MSG91 down'));
 
-it('a failed code cannot be used even though the row remains', async () => {
-  sendOtpSms.mockRejectedValueOnce(new Error('MSG91 down'));
-  await expectAppError(requestOtp(PHONE), 502);
-  await expectAppError(verifyOtp(PHONE, lastSentOtp()), 400);
-});
+    for (let i = 0; i < CFG.MAX_REQUESTS_PER_HOUR + 2; i++) {
+      await expectAppError(requestOtp(PHONE), 502);
+    }
+
+    // Restore success so the final request can actually go through.
+    sendOtpSms.mockResolvedValue({ provider: 'mock', messageId: 'mock-1' });
+    await expect(requestOtp(PHONE)).resolves.toBeTruthy();
+  });
+
+  it('a failed code cannot be used even though the row remains', async () => {
+    sendOtpSms.mockRejectedValueOnce(new Error('MSG91 down'));
+    await expectAppError(requestOtp(PHONE), 502);
+    await expectAppError(verifyOtp(PHONE, lastSentOtp()), 400);
+  });
 });
 
 // ---------------------------------------------------------------------------
