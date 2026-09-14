@@ -26,6 +26,7 @@ const ID = {
   productJar10: '11111111-0000-4000-8000-000000000002',
   productDeposit: '11111111-0000-4000-8000-000000000003',
   productRetired: '11111111-0000-4000-8000-000000000004',
+  productBottlePack: '11111111-0000-4000-8000-000000000005',
 
   addressPrimary: '22222222-0000-4000-8000-000000000001',
   addressSecondary: '22222222-0000-4000-8000-000000000002',
@@ -49,6 +50,9 @@ const PHONE = {
   customer: '9800000011',
   suspended: '9800000012',
 };
+
+// A fixed timestamp so re-seeding does not churn the column.
+const SEED_PUBLISHED_AT = new Date('2026-01-01T00:00:00.000Z');
 
 async function main() {
   // ── Service areas ─────────────────────────
@@ -206,13 +210,48 @@ async function main() {
   // Prices are strings, not numbers. The column is Decimal(10,2); passing a JS
   // float would round-trip through binary floating point on the way in.
   //
+  // publishedAt is set on every seeded row, live or retired. A retired product
+  // WAS live once — leaving it null would make it read as DRAFT, which is the
+  // opposite of what it is. Only a never-published draft has a null stamp, and
+  // the seed has none.
+  //
   // The retired product is inactive so you can prove the public catalogue
   // filters on isActive while admin listings do not.
+  //
+  // imageUrl is set on two rows and left null on a third, so both branches of
+  // the nullable column have data. Placeholder URLs rather than real assets —
+  // they must be https, because the schema rejects http (a browser silently
+  // blocks an http image inside an https page).
+
+  // The deposit is created first and on its own: the jars below reference its
+  // id, so it cannot be inside the same Promise.all as the rows that point at
+  // it. Foreign keys do not wait for concurrent inserts.
+  const jarDeposit = await prisma.product.upsert({
+    where: { id: ID.productDeposit },
+    update: { price: '300.00', isActive: true },
+    create: {
+      id: ID.productDeposit,
+      name: '20L Jar Security Deposit',
+      description: 'Refundable deposit, charged per jar you are holding',
+      // Not 0. It is what tells a 20L deposit apart from a 10L one once there
+      // are two of them. Anything rendering capacity must filter deposits out.
+      capacityMl: 20000,
+      price: '300.00',
+      isDeposit: true,
+      isActive: true,
+      publishedAt: SEED_PUBLISHED_AT,
+    },
+  });
 
   await Promise.all([
     prisma.product.upsert({
       where: { id: ID.productJar20 },
-      update: { price: '60.00', isActive: true },
+      update: {
+        price: '60.00',
+        isActive: true,
+        publishedAt: SEED_PUBLISHED_AT,
+        depositProductId: jarDeposit.id,
+      },
       create: {
         id: ID.productJar20,
         name: '20L Water Jar',
@@ -221,11 +260,19 @@ async function main() {
         price: '60.00',
         isDeposit: false,
         isActive: true,
+        publishedAt: SEED_PUBLISHED_AT,
+        depositProductId: jarDeposit.id,
+        imageUrl: 'https://placehold.co/600x600/png?text=20L+Jar',
       },
     }),
     prisma.product.upsert({
       where: { id: ID.productJar10 },
-      update: { price: '40.00', isActive: true },
+      update: {
+        price: '40.00',
+        isActive: true,
+        publishedAt: SEED_PUBLISHED_AT,
+        depositProductId: jarDeposit.id,
+      },
       create: {
         id: ID.productJar10,
         name: '10L Water Jar',
@@ -234,19 +281,9 @@ async function main() {
         price: '40.00',
         isDeposit: false,
         isActive: true,
-      },
-    }),
-    prisma.product.upsert({
-      where: { id: ID.productDeposit },
-      update: { price: '300.00', isActive: true },
-      create: {
-        id: ID.productDeposit,
-        name: '20L Jar Security Deposit',
-        description: 'One-time refundable deposit charged on the first jar',
-        capacityMl: 20000,
-        price: '300.00',
-        isDeposit: true,
-        isActive: true,
+        publishedAt: SEED_PUBLISHED_AT,
+        depositProductId: jarDeposit.id,
+        imageUrl: 'https://placehold.co/600x600/png?text=10L+Jar',
       },
     }),
     prisma.product.upsert({
@@ -259,6 +296,31 @@ async function main() {
         price: '25.00',
         isDeposit: false,
         isActive: false,
+        // Retired, not a draft — it was on sale once. A null stamp here would
+        // make it read as DRAFT, which is the opposite of what it is, and the
+        // seed would then never exercise the RETIRED branch at all.
+        publishedAt: SEED_PUBLISHED_AT,
+      },
+    }),
+    // The no-deposit case, and the reason depositProductId is nullable.
+    // Disposable bottles: nothing comes back, so there is nothing to hold in
+    // trust. depositProductId stays null and the catalogue reports
+    // `deposit: null` — which is what the client renders "no deposit" from,
+    // rather than hardcoding which products happen to need one.
+    prisma.product.upsert({
+      where: { id: ID.productBottlePack },
+      update: { price: '120.00', isActive: true, depositProductId: null },
+      create: {
+        id: ID.productBottlePack,
+        name: '1L Bottle Pack (12)',
+        description: 'Twelve sealed 1L bottles. Disposable, no jar to return.',
+        capacityMl: 12000,
+        price: '120.00',
+        isDeposit: false,
+        isActive: true,
+        publishedAt: SEED_PUBLISHED_AT,
+        depositProductId: null,
+        imageUrl: 'https://placehold.co/600x600/png?text=1L+Pack',
       },
     }),
   ]);
