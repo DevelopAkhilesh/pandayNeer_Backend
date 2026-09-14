@@ -8,7 +8,7 @@ import { AppError } from './errorHandler.js';
 // switch to an asymmetric key cannot silently start accepting a token whose
 // header names an algorithm we never intended.
 const JWT_ALGORITHMS = ['HS256'];
-const JWT_ISSUER = 'pandeyneer';
+export const JWT_ISSUER = 'salira';
 
 // One message for every rejection below. A revoked token, a suspended account
 // and a deleted user must be indistinguishable from outside, or the endpoint

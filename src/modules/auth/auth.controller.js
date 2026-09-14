@@ -8,6 +8,7 @@ import {
   verifyOtp as checkOtp,
   normalizePhone,
 } from './otp.service.js';
+import { JWT_ISSUER } from '../../middleware/authGuard.js';
 
 const OTP_REGEX = /^\d{6}$/;
 const MAX_NAME_LENGTH = 60;
@@ -93,7 +94,7 @@ function signToken(user) {
     env.JWT_SECRET,
     {
       expiresIn: env.JWT_EXPIRES_IN,
-      issuer: 'pandeyneer',
+      issuer: JWT_ISSUER,
       subject: String(user.id),
     }
   );

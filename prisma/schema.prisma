@@ -146,16 +146,24 @@ model ServiceArea {
 
 model Product {
   id          String   @id @default(uuid())
-  name        String
+  name        String   @db.Citext
   description String?
   capacityMl  Int
   price       Decimal  @db.Decimal(10, 2)
+  imageUrl    String?
   isDeposit   Boolean  @default(false)
-  isActive    Boolean  @default(true)
+  isActive    Boolean  @default(false)
+  publishedAt DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  depositProductId String?
+  depositProduct   Product?  @relation("JarDeposit", fields: [depositProductId], references: [id], onDelete: Restrict)
+  jarsUsingThis    Product[] @relation("JarDeposit")
+
   orderItems OrderItem[]
+  @@unique([name])
+  @@index([depositProductId])
 }
 
 // ─────────────────────────────────────────────
