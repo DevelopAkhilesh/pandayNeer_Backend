@@ -32,7 +32,6 @@ const OTHER_DEPOSIT_ID = '11111111-0000-4000-8000-000000000006';
 
 async function buildApp() {
   vi.resetModules();
-  vi.clearAllMocks();
 
   const { validate } = await import('../../../middleware/validate.js');
   const { errorHandler } = await import('../../../middleware/errorHandler.js');
@@ -40,9 +39,17 @@ async function buildApp() {
   const { updateProductHandler } = await import('../products.controller.js');
   const { prisma } = await import('../../../config/db.js');
 
-  prisma.product.update.mockImplementation(({ data }) =>
-    Promise.resolve({ id: JAR_ID, name: 'Row', price: '60', ...data })
-  );
+  // mockReset, not clearAllMocks — the latter leaves unconsumed
+  // mockResolvedValueOnce implementations queued for the next test. See the
+  // note in products.create.test.js, where that leak turned correct code red.
+  prisma.product.findFirst.mockReset().mockResolvedValue(null);
+  prisma.product.findUnique.mockReset().mockResolvedValue(null);
+  prisma.product.count.mockReset().mockResolvedValue(0);
+  prisma.product.update
+    .mockReset()
+    .mockImplementation(({ data }) =>
+      Promise.resolve({ id: JAR_ID, name: 'Row', price: '60', ...data })
+    );
 
   const app = express();
   app.use(express.json());

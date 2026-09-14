@@ -30,13 +30,30 @@ const JAR_ID = '11111111-0000-4000-8000-000000000001';
 
 async function buildApp() {
   vi.resetModules();
-  vi.clearAllMocks();
 
   const { validate } = await import('../../../middleware/validate.js');
   const { errorHandler } = await import('../../../middleware/errorHandler.js');
   const { createProductSchema } = await import('../products.schema.js');
   const { createProductHandler } = await import('../products.controller.js');
   const { prisma } = await import('../../../config/db.js');
+
+  // mockReset, not clearAllMocks. clearAllMocks wipes call history but leaves
+  // unconsumed mockResolvedValueOnce implementations QUEUED. A test that queues
+  // two and consumes one — or that dies partway through because an unrelated
+  // test timed out — hands its leftover value to whichever test runs next, and
+  // a perfectly correct handler then returns the wrong thing. That is not
+  // hypothetical: it turned the three duplicate-name tests red on unchanged
+  // code, in runs where the rate-limit test in another file had timed out.
+  //
+  // The cost of mockReset is that the factory's resolved values go too, so the
+  // baseline every test starts from is re-established here instead. Same shape
+  // as the beforeEach in Otp.service.test.js, for the same reason.
+  prisma.product.findFirst.mockReset().mockResolvedValue(null);
+  prisma.product.findUnique.mockReset().mockResolvedValue(null);
+  prisma.product.create.mockReset();
+  prisma.$transaction
+    .mockReset()
+    .mockImplementation((fn) => fn({ product: prisma.product }));
 
   // Whatever create is given, echo back a plausible row. These tests are about
   // what the handler WRITES, not what Prisma returns.
