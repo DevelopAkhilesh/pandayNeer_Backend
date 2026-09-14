@@ -25,10 +25,11 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/salira_test
-      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/salira_test
-      JWT_SECRET: test-secret-not-real
-      NODE_ENV: test
+       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/salira_test
+       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/salira_test
+       JWT_SECRET: test-secret-not-real
+       CORS_ORIGIN: http://localhost:5173
+       NODE_ENV: test
 
     steps:
       - uses: actions/checkout@v4

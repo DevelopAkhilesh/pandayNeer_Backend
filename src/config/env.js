@@ -31,11 +31,10 @@ const envSchema = z.object({
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error('❌ Invalid or missing environment variables:');
-  for (const issue of parsed.error.issues) {
-    console.error(`  - ${issue.path.join('.')}: ${issue.message}`);
-  }
-  process.exit(1);
+  const details = parsed.error.issues
+    .map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`)
+    .join('\n');
+  throw new Error(`Invalid or missing environment variables:\n${details}`);
 }
 
 export const env = parsed.data;
@@ -46,7 +45,6 @@ if (env.NODE_ENV === 'production') {
   const required = ['MSG91_AUTH_KEY', 'MSG91_SENDER_ID', 'MSG91_TEMPLATE_ID'];
   const missing = required.filter((k) => !env[k]);
   if (missing.length) {
-    console.error(`Missing in production: ${missing.join(', ')}`);
-    process.exit(1);
+    throw new Error(`Missing in production: ${missing.join(', ')}`);
   }
 }
