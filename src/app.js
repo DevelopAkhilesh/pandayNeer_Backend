@@ -6,6 +6,7 @@ import { env } from './config/env.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import serviceAreaRoutes from './modules/service-areas/service-areas.routes.js';
+import productRoutes from './modules/products/products.routes.js';
 const app = express();
 
 // Comma-separated so staging/preview origins can be added without a code
@@ -34,6 +35,8 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 // picode route
 app.use('/api/service-areas', serviceAreaRoutes);
+// catalogue route
+app.use('/api/products', productRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
