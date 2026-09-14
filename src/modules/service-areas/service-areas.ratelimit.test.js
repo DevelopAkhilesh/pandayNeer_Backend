@@ -6,7 +6,11 @@ import request from 'supertest';
 // DATABASE_URL, JWT_SECRET and friends at import time. This test has no .env
 // and does not need one.
 vi.mock('../../config/env.js', () => ({
-  env: { NODE_ENV: 'test' },
+  // A ceiling of 5, not the real 300. The limiter's behaviour does not depend
+  // on the number, but the test's reliability does: 300 real round trips took
+  // ~300ms alone and up to 10s inside the full suite, so a fixed timeout made
+  // correct code fail intermittently.
+  env: { NODE_ENV: 'test', PUBLIC_RATE_LIMIT_MAX: 5 },
 }));
 
 // The route reads through service-areas.cache.js, which loads the active set
@@ -22,7 +26,7 @@ vi.mock('../../config/db.js', () => ({
   },
 }));
 
-const LIMIT = 300;
+const LIMIT = 5; // must match PUBLIC_RATE_LIMIT_MAX in the env mock above
 const WINDOW_MS = 60_000;
 
 /**

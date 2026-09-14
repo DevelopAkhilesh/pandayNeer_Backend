@@ -23,6 +23,18 @@ const envSchema = z.object({
   MSG91_TEMPLATE_ID: z.string().min(1).optional(), // DLT_TE_ID for the OTP template
   MSG91_ROUTE: z.string().default('4'),
 
+  /**
+   * Ceiling for the unauthenticated public endpoints — the catalogue and the
+   * serviceability check — per IP per minute.
+   *
+   * Configurable rather than hardcoded so it can be tightened under abuse or
+   * raised for a campaign without a deploy. It also lets the rate-limit tests
+   * assert the behaviour with a handful of requests instead of 300: firing the
+   * real ceiling took ~300ms alone and up to 10s under a loaded suite, which is
+   * a timeout failure on correct code, not a bug worth chasing.
+   */
+  PUBLIC_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),

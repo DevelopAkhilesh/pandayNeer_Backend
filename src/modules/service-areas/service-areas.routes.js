@@ -3,6 +3,7 @@ import rateLimit, { MINUTE } from 'express-rate-limit';
 import { validate } from '../../middleware/validate.js';
 import { requireAuth } from '../../middleware/authGuard.js';
 import { requireAdmin } from '../../middleware/roleGuard.js';
+import { env } from '../../config/env.js';
 import {
   checkServiceabilitySchema,
   listServiceAreasSchema,
@@ -37,7 +38,7 @@ const router = Router();
  */
 const checkLimiter = rateLimit({
   windowMs: 1 * MINUTE,
-  max: 300,
+  max: env.PUBLIC_RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   message: {

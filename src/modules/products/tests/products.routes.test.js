@@ -6,7 +6,10 @@ import request from 'supertest';
 // DATABASE_URL, JWT_SECRET and friends at import time. This test has no .env
 // and does not need one — no request here gets far enough to verify a token.
 vi.mock('../../../config/env.js', () => ({
-  env: { NODE_ENV: 'test' },
+  // A ceiling of 5, not the real 300 — see the note in
+  // service-areas.ratelimit.test.js. The limiter does not care about the
+  // number; the suite's reliability does.
+  env: { NODE_ENV: 'test', PUBLIC_RATE_LIMIT_MAX: 5 },
 }));
 
 // Mocked so these tests are about routing, guards and the WHERE clause the
@@ -25,7 +28,7 @@ vi.mock('../../../config/db.js', () => ({
   },
 }));
 
-const LIMIT = 300;
+const LIMIT = 5; // must match PUBLIC_RATE_LIMIT_MAX in the env mock above
 const WINDOW_MS = 60_000;
 
 /**
@@ -43,16 +46,23 @@ const WINDOW_MS = 60_000;
  */
 async function buildApp() {
   vi.resetModules();
+  const { default: productRoutes } = await import('../products.routes.js');
+  const { errorHandler } = await import('../../../middleware/errorHandler.js');
+  const { prisma } = await import('../../../config/db.js');
+
   // resetModules clears the module registry, but NOT the vi.fn() instances the
   // factory above produced — vitest caches those per path, so the same spy is
   // handed to every test and its call history accumulates. The second test to
   // assert toHaveBeenCalledTimes(1) sees 2 and fails on a route that is
-  // perfectly correct. mockClear, not mockReset: the resolved values set in the
-  // factory must survive.
-  vi.clearAllMocks();
-  const { default: productRoutes } = await import('../products.routes.js');
-  const { errorHandler } = await import('../../../middleware/errorHandler.js');
-  const { prisma } = await import('../../../config/db.js');
+  // perfectly correct.
+  //
+  // mockReset rather than clearAllMocks: clearing wipes call history but leaves
+  // unconsumed mockResolvedValueOnce implementations queued, so a test that
+  // queues one and does not reach it hands that value to the next test. The
+  // baseline the factory set is re-established here instead of relying on it
+  // surviving. See products.create.test.js for where that leak bit.
+  prisma.product.findMany.mockReset().mockResolvedValue([]);
+  prisma.product.findUnique.mockReset().mockResolvedValue(null);
 
   const app = express();
   app.use(express.json());
@@ -263,12 +273,29 @@ describe('GET /api/products rate limiting', () => {
     vi.useRealTimers();
   });
 
+  /**
+   * Spend the whole window and return the last response.
+   *
+   * Asserts on `ratelimit-remaining` rather than on 300 separate status codes.
+   * Firing LIMIT requests and checking each one took ~10s on a busy machine and
+   * blew the 10s testTimeout, which surfaced as nonsense — a 401 on a public
+   * route, a 200 where a 429 belonged — because the test died mid-loop. It also
+   * diagnoses better: if a hit goes missing this reports the count instead of a
+   * bare status mismatch three lines later.
+   */
+  async function spendQuota(app) {
+    let last;
+    for (let i = 0; i < LIMIT; i++)
+      last = await request(app).get('/api/products');
+    expect(last.status).toBe(200);
+    expect(last.headers['ratelimit-remaining']).toBe('0');
+    return last;
+  }
+
   it('allows requests up to the limit, then refuses with our message', async () => {
     const { app } = await buildApp();
 
-    for (let i = 0; i < LIMIT; i++) {
-      expect((await request(app).get('/api/products')).status).toBe(200);
-    }
+    await spendQuota(app);
 
     const res = await request(app).get('/api/products');
     expect(res.status).toBe(429);
@@ -276,7 +303,11 @@ describe('GET /api/products rate limiting', () => {
       success: false,
       message: 'Too many requests. Please try again in a moment.',
     });
-  });
+    // 30s, not the 10s default: spending the window is 300 real round trips
+    // through supertest, which measured ~10s on a loaded machine and tripped
+    // the default budget. The slowness is inherent to proving a 300-request
+    // limit; the flakiness was only ever the budget being too tight for it.
+  }, 30_000);
 
   it('reports remaining quota in the standard headers only', async () => {
     const { app } = await buildApp();
@@ -292,7 +323,7 @@ describe('GET /api/products rate limiting', () => {
   it('lets the caller through again once the window has elapsed', async () => {
     const { app } = await buildApp();
 
-    for (let i = 0; i < LIMIT; i++) await request(app).get('/api/products');
+    await spendQuota(app);
     expect((await request(app).get('/api/products')).status).toBe(429);
 
     // One millisecond short of the window: still blocked. This is what proves
@@ -302,7 +333,7 @@ describe('GET /api/products rate limiting', () => {
 
     vi.advanceTimersByTime(1);
     expect((await request(app).get('/api/products')).status).toBe(200);
-  });
+  }, 30_000);
 
   // The limiter is mounted on '/' only. An admin whose session is being used
   // by the dashboard must not be locked out because the storefront on the same
