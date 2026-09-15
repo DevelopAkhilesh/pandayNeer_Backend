@@ -177,6 +177,39 @@ export async function listPublicProductsHandler(req, res) {
   res.status(200).json({ success: true, data: products.map(toPublicProduct) });
 }
 
+/**
+ * One product, for the customer. No auth — this is the detail screen, and the
+ * target of any share link or push notification that names a product.
+ *
+ * The same two filters as the catalogue, and for the same reasons: a retired
+ * product must not be orderable, and a deposit is not a thing anyone shops for.
+ * They are in the WHERE rather than applied to the row afterwards, so the query
+ * cannot return something this handler then has to remember to hide.
+ *
+ * findFirst, not findUnique: findUnique only accepts unique columns in `where`,
+ * so the filters could not be part of the lookup and would have to be checked
+ * after the fact — which is exactly the shape of mistake this avoids.
+ *
+ * One 404, three causes: no such id, retired, or a deposit row. Telling them
+ * apart would turn this into an oracle — walk uuids and the response tells you
+ * which products exist and which you have retired. "Not found" is the honest
+ * answer to all three anyway; from the customer's side there is nothing there.
+ */
+export async function getPublicProductHandler(req, res) {
+  const { id } = req.valid.params;
+
+  const product = await prisma.product.findFirst({
+    where: { id, isActive: true, isDeposit: false },
+    select: PUBLIC_FIELDS,
+  });
+
+  if (!product) {
+    throw new AppError('Product not found', 404);
+  }
+
+  res.status(200).json({ success: true, data: toPublicProduct(product) });
+}
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------

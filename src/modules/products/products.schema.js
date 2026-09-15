@@ -130,6 +130,16 @@ const idParams = z.object({
 export const listPublicProductsSchema = {};
 
 /**
+ * GET /api/products/:id  (public)
+ *
+ * The product detail screen, and whatever the app deep-links to from a share
+ * sheet or a notification. Same id shape as the admin route — the difference is
+ * not what may be asked for, it is what may be answered, and that lives in the
+ * controller's WHERE clause.
+ */
+export const getPublicProductSchema = { params: idParams };
+
+/**
  * GET /api/products/admin  (admin)
  *
  * All filters optional. Query strings arrive as strings, so the booleans are

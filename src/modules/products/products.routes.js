@@ -7,12 +7,14 @@ import { env } from '../../config/env.js';
 import {
   listProductsSchema,
   getProductSchema,
+  getPublicProductSchema,
   createProductSchema,
   updateProductSchema,
   deactivateProductSchema,
 } from './products.schema.js';
 import {
   listPublicProductsHandler,
+  getPublicProductHandler,
   listProductsHandler,
   getProductHandler,
   createProductHandler,
@@ -90,12 +92,41 @@ router.get(
   listProductsHandler
 );
 
+/**
+ * The admin detail route is /admin/:id, not /:id.
+ *
+ * /:id is the customer's product page — a share link, a push notification, a
+ * deep link out of the catalogue — so it cannot be the admin one. Rather than
+ * branch on the caller (rejected above, for the same reasons), the admin read
+ * surface is namespaced under /admin in full: the listing and the detail.
+ *
+ * Writes stay on the bare path. There is no public POST, PATCH or DELETE to
+ * collide with, and /api/products/admin as a write target reads like it creates
+ * an admin. The asymmetry is deliberate: reads are namespaced because two
+ * audiences want them, writes are not because only one does.
+ */
 router.get(
-  '/:id',
+  '/admin/:id',
   requireAuth,
   requireAdmin,
   validate(getProductSchema),
   getProductHandler
+);
+
+// ---------------------------------------------------------------------------
+// Public, but it MUST be registered here — below every /admin route.
+//
+// Express matches in registration order, so a '/:id' sitting above them would
+// swallow '/admin' as an id. The admin listing would then fail the uuid check
+// and answer "Invalid product id", which is a baffling thing to see on a screen
+// that asked for a list. Position is load-bearing; moving this up breaks the
+// admin routes silently, and only at runtime.
+// ---------------------------------------------------------------------------
+router.get(
+  '/:id',
+  catalogueLimiter,
+  validate(getPublicProductSchema),
+  getPublicProductHandler
 );
 
 router.post(

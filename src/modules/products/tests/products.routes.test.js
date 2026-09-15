@@ -63,6 +63,10 @@ async function buildApp() {
   // surviving. See products.create.test.js for where that leak bit.
   prisma.product.findMany.mockReset().mockResolvedValue([]);
   prisma.product.findUnique.mockReset().mockResolvedValue(null);
+  // findFirst backs the public detail route. Every spy the handlers touch has
+  // to be listed here — one left out accumulates calls across tests, and the
+  // assertion that catches it is usually in an unrelated test.
+  prisma.product.findFirst.mockReset().mockResolvedValue(null);
 
   const app = express();
   app.use(express.json());
@@ -201,13 +205,106 @@ describe('deposit on the public catalogue', () => {
   });
 });
 
+describe('GET /api/products/:id (public detail)', () => {
+  const ID = '11111111-0000-4000-8000-000000000001';
+
+  const row = {
+    id: ID,
+    name: '20L Water Jar',
+    description: null,
+    capacityMl: 20000,
+    price: '60',
+    imageUrl: null,
+    depositProduct: { name: '20L Jar Security Deposit', price: '300' },
+  };
+
+  it('is reachable with no token', async () => {
+    const { app, prisma } = await buildApp();
+    prisma.product.findFirst.mockResolvedValueOnce(row);
+
+    const res = await request(app).get(`/api/products/${ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('20L Water Jar');
+    // Same formatting contract as the catalogue, not Prisma's "60".
+    expect(res.body.data.price).toBe('60.00');
+    expect(res.body.data.deposit).toEqual({
+      name: '20L Jar Security Deposit',
+      amount: '300.00',
+    });
+  });
+
+  // The filters are the whole point. If either is dropped the failure is
+  // silent: a retired product becomes orderable again, or the deposit row
+  // becomes reachable by URL after being deliberately kept out of the list.
+  it('asks for an active, non-deposit row by id', async () => {
+    const { app, prisma } = await buildApp();
+
+    await request(app).get(`/api/products/${ID}`);
+
+    const [args] = prisma.product.findFirst.mock.calls[0];
+    expect(args.where).toEqual({ id: ID, isActive: true, isDeposit: false });
+  });
+
+  it('never selects isDeposit or isActive', async () => {
+    const { app, prisma } = await buildApp();
+
+    await request(app).get(`/api/products/${ID}`);
+
+    const [args] = prisma.product.findFirst.mock.calls[0];
+    expect(args.select).not.toHaveProperty('isDeposit');
+    expect(args.select).not.toHaveProperty('isActive');
+  });
+
+  /**
+   * One 404 for three different causes, and that is deliberate.
+   *
+   * Distinguishing "no such product" from "retired" from "that is a deposit"
+   * turns the endpoint into an oracle: walk uuids and the responses map out
+   * which products exist and which have been withdrawn. The filters live in
+   * the WHERE, so all three arrive here as the same empty result.
+   */
+  it('answers 404 identically whether missing, retired, or a deposit', async () => {
+    const { app, prisma } = await buildApp();
+    // findFirst returns null for all three — the query cannot tell them apart
+    // either, which is what makes the behaviour hold.
+    prisma.product.findFirst.mockResolvedValue(null);
+
+    const res = await request(app).get(`/api/products/${ID}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toBe('Product not found');
+  });
+
+  it('rejects a malformed id before it reaches Prisma', async () => {
+    const { app, prisma } = await buildApp();
+
+    const res = await request(app).get('/api/products/not-a-uuid');
+
+    expect(res.status).toBe(400);
+    expect(prisma.product.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('spends the public quota, like the catalogue', async () => {
+    // Unauthenticated and backed by a query, so it needs the same ceiling.
+    const { app, prisma } = await buildApp();
+    prisma.product.findFirst.mockResolvedValue(row);
+
+    const res = await request(app).get(`/api/products/${ID}`);
+
+    expect(res.headers['ratelimit-limit']).toBe(String(LIMIT));
+  });
+});
+
 describe('admin routes', () => {
   // The guards themselves are shared middleware covered by the auth suite.
   // What is worth proving here is that they are actually mounted on these
   // routes — a missing requireAuth is invisible until someone finds it.
   it.each([
     ['get', '/api/products/admin'],
-    ['get', '/api/products/11111111-0000-4000-8000-000000000001'],
+    // The admin DETAIL route. /:id without the prefix is the customer's
+    // product page and takes no token — see the public detail block below.
+    ['get', '/api/products/admin/11111111-0000-4000-8000-000000000001'],
     ['post', '/api/products'],
     ['patch', '/api/products/11111111-0000-4000-8000-000000000001'],
     ['delete', '/api/products/11111111-0000-4000-8000-000000000001'],
@@ -236,13 +333,18 @@ describe('admin routes', () => {
     expect(res.body.message).not.toMatch(/product id/i);
   });
 
-  it('rejects a malformed id before it reaches Prisma', async () => {
+  it('answers a malformed admin id with 401, not a validation error', async () => {
     const { app, prisma } = await buildApp();
 
-    const res = await request(app).get('/api/products/not-a-uuid');
+    const res = await request(app).get('/api/products/admin/not-a-uuid');
 
-    // Still 401 — the guard runs before validate, so an unauthenticated
-    // caller learns nothing about which ids exist.
+    // 401, not 400: the guard runs before validate, so an unauthenticated
+    // caller gets no response that varies with what they asked for.
+    //
+    // The public /:id route answers 400 for the same input, and that is fine —
+    // it takes no token, so there is no access decision to leak. What it must
+    // not do is distinguish a real id from a missing one, which is covered by
+    // the 404 test in the public detail block.
     expect(res.status).toBe(401);
     expect(prisma.product.findUnique).not.toHaveBeenCalled();
   });
